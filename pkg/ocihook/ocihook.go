@@ -240,6 +240,15 @@ func newHandlerOpts(state *specs.State, dataStore, cniPath, cniNetconfPath, brid
 		o.ipPerNetwork = ipPerNetwork
 	}
 
+	// Parse per-network interface name map if present (for compose interface_name support)
+	if ifNameJSON, ok := o.state.Annotations[labels.IfNamePerNetwork]; ok && ifNameJSON != "" {
+		var ifNamePerNetwork map[string]string
+		if err := json.Unmarshal([]byte(ifNameJSON), &ifNamePerNetwork); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal per-network interface name map: %w", err)
+		}
+		o.ifNamePerNetwork = ifNamePerNetwork
+	}
+
 	if rootlessutil.IsRootlessChild() {
 		o.rootlessKitClient, err = rootlessutil.NewRootlessKitClient()
 		if err != nil {
@@ -280,6 +289,7 @@ type handlerOpts struct {
 	containerMAC      string
 	containerIP6      string
 	ipPerNetwork      map[string]string
+	ifNamePerNetwork  map[string]string
 }
 
 // hookSpec is from https://github.com/containerd/containerd/blob/v1.4.3/cmd/containerd/command/oci-hook.go#L59-L64
@@ -475,9 +485,14 @@ func portReserverPidFilePath(opts *handlerOpts) string {
 	return filepath.Join("/run/nerdctl/", opts.state.Annotations[labels.Namespace], opts.state.ID, "port-reserver.pid")
 }
 
-// perNetworkIfName returns the container-side interface name for a given network index
-// (e.g., "eth0", "eth1", "eth2").
-func perNetworkIfName(index int) string {
+// perNetworkIfName returns the container-side interface name for a given network.
+// If a custom name is specified in ifNamePerNetwork, it is used; otherwise falls back to "ethN".
+func perNetworkIfName(index int, networkName string, ifNamePerNetwork map[string]string) string {
+	if ifNamePerNetwork != nil {
+		if name, ok := ifNamePerNetwork[networkName]; ok && name != "" {
+			return name
+		}
+	}
 	return fmt.Sprintf("eth%d", index)
 }
 
@@ -495,7 +510,7 @@ func perNetworkAdd(ctx context.Context, opts *handlerOpts, networkIndex int, nsP
 	rt := &cnilibrary.RuntimeConf{
 		ContainerID:    opts.fullID,
 		NetNS:          nsPath,
-		IfName:         perNetworkIfName(networkIndex),
+		IfName:         perNetworkIfName(networkIndex, opts.cniNames[networkIndex], opts.ifNamePerNetwork),
 		Args:           extraArgs,
 		CapabilityArgs: make(map[string]interface{}),
 	}
@@ -523,7 +538,7 @@ func perNetworkDel(ctx context.Context, opts *handlerOpts, networkIndex int, nsP
 	rt := &cnilibrary.RuntimeConf{
 		ContainerID:    opts.fullID,
 		NetNS:          nsPath,
-		IfName:         perNetworkIfName(networkIndex),
+		IfName:         perNetworkIfName(networkIndex, opts.cniNames[networkIndex], opts.ifNamePerNetwork),
 		Args:           extraArgs,
 		CapabilityArgs: make(map[string]interface{}),
 	}
@@ -624,11 +639,12 @@ func applyNetworkSettings(opts *handlerOpts) (err error) {
 		Name:       opts.state.Annotations[labels.Name],
 	}
 
-	// When per-network IPs are specified (multi-network with different static IPs),
-	// we must set up each network individually so each CNI plugin receives only its own IP.
+	// When per-network IPs or custom interface names are specified,
+	// we must set up each network individually so each CNI plugin receives
+	// only the IP for its own network and/or the correct interface name.
 	// We use cnilibrary directly (instead of go-cni's Setup) so that each network
-	// gets the correct interface name (eth0, eth1, eth2, ...) rather than all getting eth0.
-	if len(opts.ipPerNetwork) > 0 {
+	// gets the correct interface name rather than all getting eth0.
+	if len(opts.ipPerNetwork) > 0 || len(opts.ifNamePerNetwork) > 0 {
 		// Pre-emptively clean up (see comment below for rationale)
 		for i := range opts.cniNames {
 			_ = perNetworkDel(ctx, opts, i, "", nil, nil)
@@ -838,9 +854,9 @@ func onPostStop(opts *handlerOpts) error {
 			return err
 		}
 
-		if len(opts.ipPerNetwork) > 0 {
+		if len(opts.ipPerNetwork) > 0 || len(opts.ifNamePerNetwork) > 0 {
 			// Per-network cleanup: remove each network individually with its own IP
-			// and the correct interface name (ethN).
+			// and the correct interface name.
 			var capPortMappings []cni.PortMapping
 			if len(opts.ports) > 0 {
 				capPortMappings = opts.ports

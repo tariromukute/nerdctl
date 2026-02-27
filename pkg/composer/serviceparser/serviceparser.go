@@ -597,8 +597,9 @@ func newContainer(project *types.Project, parsed *Service, i int) (*Container, e
 		return nil, err
 	}
 	netTypeContainer := false
-	// Collect per-network static IPs to determine if we need a per-network IP map.
+	// Collect per-network static IPs and custom interface names.
 	networkIPMap := make(map[string]string)
+	ifNameMap := make(map[string]string)
 	for _, net := range networks {
 		if strings.HasPrefix(net.fullName, "container:") {
 			netTypeContainer = true
@@ -610,6 +611,9 @@ func newContainer(project *types.Project, parsed *Service, i int) (*Container, e
 			}
 			if value != nil && value.MacAddress != "" {
 				c.RunArgs = append(c.RunArgs, "--mac-address="+value.MacAddress)
+			}
+			if value != nil && value.InterfaceName != "" {
+				ifNameMap[net.fullName] = value.InterfaceName
 			}
 		}
 	}
@@ -626,6 +630,14 @@ func newContainer(project *types.Project, parsed *Service, i int) (*Container, e
 		for _, ip := range networkIPMap {
 			c.RunArgs = append(c.RunArgs, "--ip="+ip)
 		}
+	}
+	// Pass custom interface names as an annotation when any network specifies interface_name.
+	if len(ifNameMap) > 0 {
+		ifNameJSON, err := json.Marshal(ifNameMap)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal per-network interface name map: %w", err)
+		}
+		c.RunArgs = append(c.RunArgs, fmt.Sprintf("--annotation=%s=%s", labels.IfNamePerNetwork, string(ifNameJSON)))
 	}
 
 	if netTypeContainer && svc.Hostname != "" {

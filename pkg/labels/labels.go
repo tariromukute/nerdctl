@@ -74,6 +74,10 @@ const (
 	// IPv4 addresses. Used for multi-network containers.
 	IPAddressPerNetwork = Prefix + "ip-per-network"
 
+	// IfNamePerNetwork is a JSON-encoded map of network names to custom container-side
+	// interface names (e.g., {"ovsnet": "web0"}). Used for compose interface_name support.
+	IfNamePerNetwork = Prefix + "ifname-per-network"
+
 	// LogURI is the log URI
 	LogURI = Prefix + "log-uri"
 
